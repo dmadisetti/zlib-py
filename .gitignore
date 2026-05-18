@@ -1,6 +1,9 @@
 /target
 /result
 
+# Local working doc — not for the repo.
+/CONVERSION.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/

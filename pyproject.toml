@@ -4,9 +4,19 @@ build-backend = "maturin"
 
 [project]
 name = "zlib-py"
-requires-python = ">=3.8"
+requires-python = ">=3.14"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 dynamic = ["version"]
+
+[dependency-groups]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "zlib_py.zlib_py"
