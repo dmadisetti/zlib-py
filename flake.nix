@@ -58,6 +58,25 @@
         cpythonShortRev = builtins.substring 0 7 cpythonRev;
         customPython = (pkgs.python315.override (old: {
           self = customPython;
+          # Tell nixpkgs what version we're *actually* building so installed
+          # paths (lib/python3.16/...) line up with what cpython 3.16-alpha
+          # writes. Without this nixpkgs computes paths against the scaffold
+          # version (3.15) and postInstall steps like stripTests fail when
+          # they can't find lib/python3.15/test/__init__.py.
+          sourceVersion = {
+            major = "3";
+            minor = "16";
+            patch = "0";
+            suffix = "a-${cpythonShortRev}";
+          };
+          # Cross-compile passthru looks up `pkgsBuildTarget.${pythonAttr}`.
+          # nixpkgs has no `python316` attribute yet, so pin to the closest
+          # one (`python315`) for that lookup. Build-host side only — the
+          # actual interpreter is still our overridden 3.16 derivation.
+          pythonAttr = "python315";
+          # Unused (src is overridden below) but the scaffold function
+          # demands a non-null hash arg.
+          hash = pkgs.lib.fakeHash;
         })).overrideAttrs (old: {
           pname = "cpython-git";
           version = cpythonShortRev;
@@ -75,6 +94,12 @@
             [ "--replace-fail 'libmpdec_machine=universal'" ]
             [ "--replace-quiet 'libmpdec_machine=universal'" ]
             (old.preConfigure or "");
+
+          # Bumping sourceVersion to 3.16 makes nixpkgs look for patches
+          # under cpython/3.16/, which doesn't exist. The 3.15 patches
+          # (no-ldconfig, virtualenv-permissions, mimetypes) apply cleanly
+          # to 3.16-alpha, so re-pin to them.
+          patches = pkgs.python315.drvAttrs.patches;
         });
 
         # Two flavours of the same [patch.crates-io] block:

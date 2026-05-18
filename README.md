@@ -40,3 +40,11 @@ This uses whatever CPython + pyo3 your environment resolves (no grantees of work
 - [Official GitHub org](https://github.com/Rust-for-CPython)
 - [Pre-PEP discussion thread](https://discuss.python.org/t/pre-pep-rust-for-cpython/104906)
 - [Latest progress update (2026-04)](https://blog.python.org/2026/04/rust-for-cpython-2026-04/)
+
+## Acknowledgements
+
+Prior art and inspiration: [`farhaanaliii/zlib-rs-python`](https://github.com/farhaanaliii/zlib-rs-python) — a separate pyo3 binding to `zlib-rs` with a broader stdlib-`zlib`-compatible surface (`compressobj`, `decompressobj`, checksums). If you want a more complete drop-in replacement today, look there.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
