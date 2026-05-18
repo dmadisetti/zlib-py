@@ -130,15 +130,19 @@ PATCH
           '';
         };
 
+        testEnv = customPython.withPackages (ps: [ zlibPy ps.pytest ]);
+
       in {
         packages = {
           default = zlibPy;
           python  = customPython.withPackages (_: [ zlibPy ]);
+          inherit testEnv;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
             customPython
+            customPython.pkgs.pytest
             pkgs.maturin
             pkgs.cargo
             pkgs.rustc
