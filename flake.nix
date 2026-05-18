@@ -19,7 +19,7 @@
           owner  = "python";
           repo   = "cpython";
           rev    = cpythonRev;
-          sha256 = "sha256-nbOwTSb3MTICxi0d8nIlMOp2htfAkOLfNnzT2u2TK4k=";
+          sha256 = "sha256-QtzHQqVUHzTyO9WzlNSz2tZ+Pab82nxPOn6E2RrudSo=";
         };
 
         # pyo3 source fetched outside the FOD so we can use path patches —
