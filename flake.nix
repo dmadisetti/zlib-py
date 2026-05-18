@@ -19,7 +19,7 @@
           owner  = "python";
           repo   = "cpython";
           rev    = cpythonRev;
-          sha256 = "sha256-nbOwTSb3MTICxi0d8nIlMOp2htfAkOLfNnzT2u2TK4k=";
+          sha256 = "sha256-QtzHQqVUHzTyO9WzlNSz2tZ+Pab82nxPOn6E2RrudSo=";
         };
 
         # pyo3 source fetched outside the FOD so we can use path patches —
@@ -32,22 +32,74 @@
           sha256 = "sha256-nbOwTSb3MTICxi0d8nIlMOp2htfAkOLfNnzT2u2TK4k=";
         };
 
-        # Custom CPython: take a current nixpkgs python derivation as scaffolding
-        # (we only reuse its configure/build wiring), swap the source for our
-        # pinned git rev, and add autoreconfHook so the missing ./configure is
-        # regenerated before nixpkgs' configurePhase runs.
+        # Custom CPython: take a current nixpkgs python derivation as
+        # scaffolding (we only reuse its configure/build wiring) and swap the
+        # source for our pinned git rev. The tarball-shaped source from
+        # fetchFromGitHub already contains a pregenerated `./configure`, so
+        # there's no need for autoreconfHook here.
         #
-        # The base attribute (`python313`) is just the scaffold — the resulting
-        # interpreter's actual version comes from the cpython commit. If the
-        # commit lives on a different branch, swap the scaffold accordingly.
+        # Two-stage override:
+        #   1. `.override { self = customPython; ... }` re-runs the python
+        #      derivation function with `self` bound to *our* final
+        #      derivation. This is the fix-point that makes passthru attrs
+        #      (`pkgs`, `withPackages`, `pythonForBuild`) reference the
+        #      customized interpreter rather than the unmodified scaffold.
+        #   2. `.overrideAttrs` then swaps `src` / `version` on top. Passthru
+        #      is already wired to `self`, so withPackages picks up the
+        #      overridden interpreter correctly.
+        #
+        # Plain `.overrideAttrs` alone leaves passthru pinned to the original
+        # python — `customPython.withPackages` silently builds a stock env.
+        #
+        # The base attribute (`python315`) determines the build *scaffolding*
+        # (configure flags, library deps); the actual interpreter version
+        # comes from the cpython commit. Pick a scaffold close to the target
+        # version so configure flags match.
         cpythonShortRev = builtins.substring 0 7 cpythonRev;
-        customPython = pkgs.python313.overrideAttrs (old: {
+        customPython = (pkgs.python315.override (old: {
+          self = customPython;
+          # Tell nixpkgs what version we're *actually* building so installed
+          # paths (lib/python3.16/...) line up with what cpython 3.16-alpha
+          # writes. Without this nixpkgs computes paths against the scaffold
+          # version (3.15) and postInstall steps like stripTests fail when
+          # they can't find lib/python3.15/test/__init__.py.
+          sourceVersion = {
+            major = "3";
+            minor = "16";
+            patch = "0";
+            suffix = "a-${cpythonShortRev}";
+          };
+          # Cross-compile passthru looks up `pkgsBuildTarget.${pythonAttr}`.
+          # nixpkgs has no `python316` attribute yet, so pin to the closest
+          # one (`python315`) for that lookup. Build-host side only — the
+          # actual interpreter is still our overridden 3.16 derivation.
+          pythonAttr = "python315";
+          # Unused (src is overridden below) but the scaffold function
+          # demands a non-null hash arg.
+          hash = pkgs.lib.fakeHash;
+        })).overrideAttrs (old: {
           pname = "cpython-git";
           version = cpythonShortRev;
           src = cpythonSrc;
-          nativeBuildInputs = (old.nativeBuildInputs or [])
-            ++ [ pkgs.autoreconfHook ];
           doCheck = false;
+
+          # nixpkgs' preConfigure does a `substituteInPlace configure
+          # --replace-fail 'libmpdec_machine=universal' …` to defeat Darwin
+          # universal-build autodetection. CPython 3.16+ rewrote the
+          # detection and the literal string is gone, so --replace-fail
+          # aborts the build. Patch our copy to use --replace-quiet, which
+          # tolerates a missing pattern; `export PYTHON_DECIMAL_WITH_MACHINE`
+          # earlier in the same script still does the heavy lifting.
+          preConfigure = builtins.replaceStrings
+            [ "--replace-fail 'libmpdec_machine=universal'" ]
+            [ "--replace-quiet 'libmpdec_machine=universal'" ]
+            (old.preConfigure or "");
+
+          # Bumping sourceVersion to 3.16 makes nixpkgs look for patches
+          # under cpython/3.16/, which doesn't exist. The 3.15 patches
+          # (no-ldconfig, virtualenv-permissions, mimetypes) apply cleanly
+          # to 3.16-alpha, so re-pin to them.
+          patches = pkgs.python315.drvAttrs.patches;
         });
 
         # Two flavours of the same [patch.crates-io] block:
