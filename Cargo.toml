@@ -1,0 +1,14 @@
+[package]
+name = "zlib-py"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "zlib_py"
+crate-type = ["cdylib"]
+
+
+[dependencies]
+pyo3 = "0.27.0"
+zlib-rs = "0.6.3"

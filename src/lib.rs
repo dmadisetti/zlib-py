@@ -1,0 +1,50 @@
+use pyo3::prelude::*;
+
+/// zlib-rs bindings for Python
+#[pymodule]
+mod zlib_py {
+    use pyo3::prelude::*;
+    // @TODO(dmadisetti)
+    //
+    // Attributes
+    //     DEFLATED
+    //     DEF_BUF_SIZE
+    //     DEF_MEM_LEVEL
+    //     MAX_WBITS
+    //     ZLIB_RUNTIME_VERSION
+    //     ZLIB_VERSION
+    //     Z_BEST_COMPRESSION
+    //     Z_BEST_SPEED
+    //     Z_BLOCK
+    //     Z_DEFAULT_COMPRESSION
+    //     Z_DEFAULT_STRATEGY
+    //     Z_FILTERED
+    //     Z_FINISH
+    //     Z_FIXED
+    //     Z_FULL_FLUSH
+    //     Z_HUFFMAN_ONLY
+    //     Z_NO_COMPRESSION
+    //     Z_NO_FLUSH
+    //     Z_PARTIAL_FLUSH
+    //     Z_RLE
+    //     Z_SYNC_FLUSH
+    //     Z_TREES
+    //
+    // Internal
+    //     _ZlibDecompressor
+    //     __doc__
+    //     __loader__
+    //     __name__
+    //     __package__
+    //     __spec__
+    //     __version__
+    //
+    // Public api:
+    //     adler32
+    //     compress
+    //     compressobj
+    //     crc32
+    //     decompress
+    //     decompressobj
+    //     error
+}
