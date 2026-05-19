@@ -6,8 +6,9 @@
 //! callable bodies all raise `NotImplementedError`. Filled in
 //! function-by-function in subsequent commits — see CONVERSION.md.
 
+use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyNotImplementedError};
+use pyo3::exceptions::{PyBufferError, PyException, PyNotImplementedError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -24,7 +25,20 @@ fn stub<T>() -> PyResult<T> {
 #[pyfunction]
 #[pyo3(signature = (data, value=1, /))]
 fn adler32(data: &Bound<'_, PyAny>, value: u32) -> PyResult<u32> {
-    stub()
+    let buf = PyBuffer::<u8>::get(data)?;
+    if !buf.is_c_contiguous() {
+        return Err(PyBufferError::new_err(
+            "buffer must be C-contiguous",
+        ));
+    }
+    // PyBuffer keeps the underlying storage pinned for its lifetime, so this
+    // slice is safe to read from. We don't release the GIL: adler32 is a
+    // tight SIMD loop and the overhead of releasing+re-acquiring dwarfs the
+    // compute for any input small enough to be common.
+    let slice = unsafe {
+        std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.item_count())
+    };
+    Ok(zlib_rs::adler32::adler32(value, slice))
 }
 
 #[pyfunction]

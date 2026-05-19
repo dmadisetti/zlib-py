@@ -158,7 +158,16 @@ PATCH
           outputHash = "sha256-cCAN6Wekbg1XS/cmWya2SqFi7uUZODWcU3vCvAIDS8M=";
         };
 
-        zlibPy = customPython.pkgs.buildPythonPackage {
+        # The package is built using the *scaffold* python's pkgs scope
+        # rather than `customPython.pkgs`. customPython is 3.16-alpha and
+        # nixpkgs has no python316 bootstrap chain — buildPythonPackage's
+        # hooks (pythonRuntimeDepsCheckHook, etc.) import 3.15-built
+        # `packaging`, which 3.16 can't load. Since we enabled pyo3's
+        # `abi3-py38` feature, the resulting wheel's .so is version
+        # agnostic, so customPython picks it up fine at runtime via
+        # PYTHONPATH.
+        scaffoldPython = pkgs.python315;
+        zlibPy = scaffoldPython.pkgs.buildPythonPackage {
           pname = "zlib-py";
           version = "0.1.0";
           src = lib.cleanSource ./.;
@@ -171,6 +180,11 @@ PATCH
             maturin
           ];
 
+          # pyo3 0.27 only knows up to Python 3.14; the scaffold here is
+          # 3.15. With abi3-py38 enabled the actual ABI is stable, so the
+          # check is overly conservative — wave it off.
+          env.PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1";
+
           postPatch = ''
             chmod -R u+w .
             sed "s|@PYO3_SRC@|${pyo3Src}|g" \
@@ -182,19 +196,33 @@ PATCH
           '';
         };
 
-        testEnv = customPython.withPackages (ps: [ zlibPy ps.pytest ]);
+        # Wrap customPython so the abi3 wheel built against the scaffold
+        # python is importable by our 3.16-alpha interpreter.
+        zlibPySitePackages = "${zlibPy}/${scaffoldPython.sitePackages}";
+        mkCustomPythonEnv = extraPath: pkgs.runCommand "cpython-git-${cpythonShortRev}-env" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p $out/bin
+          for bin in ${customPython}/bin/python*; do
+            name=$(basename $bin)
+            makeWrapper $bin $out/bin/$name \
+              --prefix PYTHONPATH : "${zlibPySitePackages}${extraPath}"
+          done
+        '';
+
+        testEnv = mkCustomPythonEnv ":${scaffoldPython.pkgs.pytest}/${scaffoldPython.sitePackages}";
 
       in {
         packages = {
           default = zlibPy;
-          python  = customPython.withPackages (_: [ zlibPy ]);
+          python  = mkCustomPythonEnv "";
           inherit testEnv;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
             customPython
-            customPython.pkgs.pytest
+            scaffoldPython.pkgs.pytest
             pkgs.maturin
             pkgs.cargo
             pkgs.rustc
