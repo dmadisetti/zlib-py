@@ -182,17 +182,22 @@ fn decompress(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
     wbits: i32,
-    bufsize: usize,
+    bufsize: isize,
 ) -> PyResult<Py<PyBytes>> {
     validate_decompress_wbits(wbits)?;
+    if bufsize < 0 {
+        return Err(PyValueError::new_err("bufsize must be non-negative"));
+    }
     let buf = PyBuffer::<u8>::get(data)?;
     let input = buffer_as_slice(&buf)?;
 
     let config = zlib_rs::InflateConfig { window_bits: wbits };
     // Start at bufsize literally (spec: bufsize is the initial buffer; 0 is
     // coerced to 1). Double on BufError, no fixed cap — caller's RAM is the
-    // limit, not us.
-    let mut size = bufsize.max(1);
+    // limit, not us. isize parameter ensures bufsize > isize::MAX (e.g.
+    // sys.maxsize + 1) raises OverflowError at parse time rather than
+    // panicking inside Vec::resize.
+    let mut size = (bufsize as usize).max(1);
     loop {
         let mut output = vec![0u8; size];
         let (decompressed, rc) = zlib_rs::decompress_slice(&mut output, input, config);

@@ -8,6 +8,7 @@ file so the small classes don't sprawl into separate modules. Bodies are
 reproduced verbatim apart from rebinding `zlib` → `zlib_py`.
 """
 
+import sys
 import unittest
 
 import zlib_py as zlib  # so vendored bodies run against our module unmodified
@@ -65,6 +66,23 @@ class ExceptionTestCase(unittest.TestCase):
         # verify failure on calling decompressobj.flush with bad params
         self.assertRaises(ValueError, zlib.decompressobj().flush, 0)
         self.assertRaises(ValueError, zlib.decompressobj().flush, -1)
+
+    # Lines 275-282 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_overflow(self):
+        with self.assertRaisesRegex(OverflowError, 'int too large'):
+            zlib.decompress(b'', 15, sys.maxsize + 1)
+        with self.assertRaisesRegex(OverflowError, 'int too large'):
+            zlib.decompressobj().decompress(b'', sys.maxsize + 1)
+        with self.assertRaisesRegex(OverflowError, 'int too large'):
+            zlib.decompressobj().flush(sys.maxsize + 1)
+
+    # Lines 284-288 of Lib/test/test_zlib.py @ 5775aa8e
+    # CPython gates this `@support.cpython_only`; we inline the relevant
+    # behavior (check_disallow_instantiation reduces to assertRaises TypeError).
+    def test_disallow_instantiation(self):
+        # Ensure that the type disallows instantiation (bpo-43916)
+        self.assertRaises(TypeError, type(zlib.compressobj()))
+        self.assertRaises(TypeError, type(zlib.decompressobj()))
 
 
 class TestModule(unittest.TestCase):
