@@ -8,9 +8,28 @@
 
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyException, PyNotImplementedError};
+use pyo3::exceptions::{PyBufferError, PyException, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+
+/// Validate wbits for one-shot compress / streaming compressobj.
+/// Accepts -15..=-8 (raw), 8..=15 (zlib), 25..=31 (gzip).
+fn validate_compress_wbits(wbits: i32) -> PyResult<()> {
+    if (-15..=-8).contains(&wbits) || (8..=15).contains(&wbits) || (25..=31).contains(&wbits) {
+        Ok(())
+    } else {
+        Err(error::new_err("Invalid initialization option"))
+    }
+}
+
+/// Get a contiguous `&[u8]` view of a buffer-protocol object.
+/// Caller must keep the PyBuffer alive for the slice's lifetime.
+fn buffer_as_slice<'a>(buf: &'a PyBuffer<u8>) -> PyResult<&'a [u8]> {
+    if !buf.is_c_contiguous() {
+        return Err(PyBufferError::new_err("buffer must be C-contiguous"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.item_count()) })
+}
 
 create_exception!(zlib_py, error, PyException);
 
@@ -70,8 +89,36 @@ fn crc32_combine(crc1: u32, crc2: u32, len2: i64) -> PyResult<u32> {
 
 #[pyfunction]
 #[pyo3(signature = (data, /, level=-1, wbits=15))]
-fn compress(data: &Bound<'_, PyAny>, level: i32, wbits: i32) -> PyResult<Py<PyBytes>> {
-    stub()
+fn compress(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    level: i32,
+    wbits: i32,
+) -> PyResult<Py<PyBytes>> {
+    if level != -1 && !(0..=9).contains(&level) {
+        return Err(PyValueError::new_err("Bad compression level"));
+    }
+    validate_compress_wbits(wbits)?;
+
+    let buf = PyBuffer::<u8>::get(data)?;
+    let input = buffer_as_slice(&buf)?;
+
+    let mut config = zlib_rs::DeflateConfig::new(level);
+    config.window_bits = wbits;
+
+    let bound = zlib_rs::compress_bound(input.len());
+    let mut output = vec![0u8; bound];
+    let (compressed, rc) = zlib_rs::compress_slice(&mut output, input, config);
+    match rc {
+        zlib_rs::ReturnCode::Ok | zlib_rs::ReturnCode::StreamEnd => {
+            let n = compressed.len();
+            Ok(PyBytes::new(py, &output[..n]).unbind())
+        }
+        _ => Err(error::new_err(format!(
+            "Error {:?} while compressing data",
+            rc
+        ))),
+    }
 }
 
 #[pyfunction]
