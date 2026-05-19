@@ -14,3 +14,18 @@ from .zlib_py import _Compress, _Decompress  # noqa: F401
 # leaks an extra name into `dir(zlib_py)`. Drop it so the public surface
 # matches stdlib `zlib`.
 del zlib_py  # type: ignore[name-defined]
+
+
+def __getattr__(name):
+    # Mirrors CPython's deprecation of `zlib.__version__` (slated for 3.20).
+    # Module-level __getattr__ keeps the name out of `dir()` while still
+    # serving the access with the spec-mandated DeprecationWarning.
+    if name == "__version__":
+        import warnings
+        warnings.warn(
+            "'__version__' is deprecated and slated for removal in Python 3.20",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return ZLIB_VERSION  # noqa: F821
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -17,11 +17,15 @@ use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
 
 /// Validate wbits for one-shot compress / streaming compressobj.
 /// Accepts -15..=-8 (raw), 8..=15 (zlib), 25..=31 (gzip).
+///
+/// CPython's zlibmodule.c maps zlib's Z_STREAM_ERROR (returned by
+/// deflateInit2 for out-of-range wbits) to `PyExc_ValueError`, not
+/// `zlib.error`, so we do the same.
 fn validate_compress_wbits(wbits: i32) -> PyResult<()> {
     if (-15..=-8).contains(&wbits) || (8..=15).contains(&wbits) || (25..=31).contains(&wbits) {
         Ok(())
     } else {
-        Err(error::new_err("Invalid initialization option"))
+        Err(PyValueError::new_err("Invalid initialization option"))
     }
 }
 
@@ -38,7 +42,7 @@ fn validate_decompress_wbits(wbits: i32) -> PyResult<()> {
     {
         Ok(())
     } else {
-        Err(error::new_err("Invalid initialization option"))
+        Err(PyValueError::new_err("Invalid initialization option"))
     }
 }
 
@@ -144,11 +148,10 @@ fn compress(
     level: i32,
     wbits: i32,
 ) -> PyResult<Py<PyBytes>> {
-    if level != -1 && !(0..=9).contains(&level) {
-        return Err(PyValueError::new_err("Bad compression level"));
-    }
-    validate_compress_wbits(wbits)?;
-
+    // CPython's one-shot compress() routes invalid level / wbits through
+    // deflateInit2 and maps the resulting Z_STREAM_ERROR to zlib.error —
+    // not ValueError. (compressobj() does map to ValueError; see below.)
+    // No upfront validation here; let compress_slice report.
     let buf = PyBuffer::<u8>::get(data)?;
     let input = buffer_as_slice(&buf)?;
 
@@ -284,7 +287,7 @@ fn decompressobj(wbits: i32, zdict: Option<&Bound<'_, PyAny>>) -> PyResult<Decom
         ));
     }
     if !((-15..=-8).contains(&wbits) || (8..=15).contains(&wbits) || wbits == 0) {
-        return Err(error::new_err("Invalid initialization option"));
+        return Err(PyValueError::new_err("Invalid initialization option"));
     }
     let (zlib_header, window_bits) = if wbits == 0 {
         // wbits=0 means "use header's window size" — Inflate::new doesn't
@@ -365,6 +368,7 @@ pub struct Compress {
 
 #[pymethods]
 impl Compress {
+    #[pyo3(signature = (data, /))]
     fn compress(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
         let py_buf = PyBuffer::<u8>::get(data)?;
         let input = buffer_as_slice(&py_buf)?;
@@ -460,7 +464,7 @@ pub struct Decompress {
 
 #[pymethods]
 impl Decompress {
-    #[pyo3(signature = (data, max_length=0, /))]
+    #[pyo3(signature = (data, /, max_length=0))]
     fn decompress(
         &self,
         py: Python<'_>,
@@ -495,10 +499,14 @@ impl Decompress {
         // Per CPython: max_length=0 means "no limit" (mapped to as much as
         // we can decode in one shot, doubling on need).
         let mut output: Vec<u8> = Vec::new();
+        // Cap initial allocation regardless of max_length: it's just a
+        // working buffer, the inner loop refills as needed. Without the cap,
+        // callers passing max_length=sys.maxsize would OOM us.
+        const MAX_INITIAL_BUF: usize = 65536;
         let initial = if max_length > 0 {
-            max_length
+            max_length.min(MAX_INITIAL_BUF)
         } else {
-            16384.max(input.len() * 2)
+            16384.max(input.len() * 2).min(MAX_INITIAL_BUF)
         };
         if state.buf.len() < initial {
             state.buf.resize(initial, 0);
@@ -580,28 +588,65 @@ impl Decompress {
     }
 
     #[pyo3(signature = (length=16384, /))]
-    fn flush(&self, py: Python<'_>, length: usize) -> PyResult<Py<PyBytes>> {
-        if length == 0 {
+    fn flush(&self, py: Python<'_>, length: i64) -> PyResult<Py<PyBytes>> {
+        if length <= 0 {
             return Err(PyValueError::new_err("length must be greater than zero"));
         }
+        // `length` is a working-buffer hint per CPython spec — flush must
+        // drain ALL remaining output, not stop at `length` bytes. Cap the
+        // scratch buffer (callers can pass sys.maxsize); we'll loop until
+        // the decoder reports StreamEnd or stalls.
+        const MAX_FLUSH_BUF: usize = 65536;
+        let buf_size = (length as usize).min(MAX_FLUSH_BUF).max(1024);
         let mut guard = self.state.lock().unwrap();
         let state = &mut *guard;
         if state.eof {
             return Ok(PyBytes::new(py, b"").unbind());
         }
-        // Drain unconsumed tail with Finish.
-        let input: Vec<u8> = std::mem::take(&mut state.unconsumed_tail);
-        if state.buf.len() < length {
-            state.buf.resize(length, 0);
+        if state.buf.len() < buf_size {
+            state.buf.resize(buf_size, 0);
         }
+        // Feed unconsumed tail with Finish, drain pending output.
+        let mut input: Vec<u8> = std::mem::take(&mut state.unconsumed_tail);
+        let mut input_pos = 0;
         let mut output: Vec<u8> = Vec::new();
-        let old_total_out = state.inflate.total_out();
-        let _ = state
-            .inflate
-            .decompress(&input, &mut state.buf, InflateFlush::Finish)
-            .map_err(|e| error::new_err(format!("Error while flushing: {:?}", e)))?;
-        let produced = (state.inflate.total_out() - old_total_out) as usize;
-        output.extend_from_slice(&state.buf[..produced]);
+        loop {
+            let chunk_in = &input[input_pos..];
+            let old_total_in = state.inflate.total_in();
+            let old_total_out = state.inflate.total_out();
+            let result = state
+                .inflate
+                .decompress(chunk_in, &mut state.buf, InflateFlush::Finish);
+            let consumed = (state.inflate.total_in() - old_total_in) as usize;
+            let produced = (state.inflate.total_out() - old_total_out) as usize;
+            input_pos += consumed;
+            output.extend_from_slice(&state.buf[..produced]);
+            match result {
+                Ok(Status::StreamEnd) => {
+                    state.eof = true;
+                    break;
+                }
+                Ok(_) => {
+                    if consumed == 0 && produced == 0 {
+                        // No forward progress — stop.
+                        break;
+                    }
+                    // Otherwise, loop and let the decoder emit more.
+                }
+                Err(e) => {
+                    return Err(error::new_err(format!(
+                        "Error while flushing: {:?}",
+                        e
+                    )));
+                }
+            }
+            // Empty the input buffer once we've fed everything — subsequent
+            // iters drain the decoder's internal state.
+            if input_pos >= input.len() {
+                input.clear();
+                input_pos = 0;
+            }
+        }
         Ok(PyBytes::new(py, &output).unbind())
     }
 

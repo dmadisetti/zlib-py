@@ -247,6 +247,199 @@ class CompressObjectTestCase(unittest.TestCase):
         dco = zlib.decompressobj()
         self.assertRaises(zlib.error, dco.decompress, cd)
 
+    # Lines 413-432 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_keywords(self):
+        level = 2
+        method = zlib.DEFLATED
+        wbits = -12
+        memLevel = 9
+        strategy = zlib.Z_FILTERED
+        co = zlib.compressobj(level=level,
+                              method=method,
+                              wbits=wbits,
+                              memLevel=memLevel,
+                              strategy=strategy,
+                              zdict=b"")
+        do = zlib.decompressobj(wbits=wbits, zdict=b"")
+        with self.assertRaises(TypeError):
+            co.compress(data=HAMLET_SCENE)
+        with self.assertRaises(TypeError):
+            do.decompress(data=zlib.compress(HAMLET_SCENE))
+        x = co.compress(HAMLET_SCENE) + co.flush()
+        y = do.decompress(x, max_length=len(HAMLET_SCENE)) + do.flush()
+        self.assertEqual(HAMLET_SCENE, y)
+
+    # Lines 434-447 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_compressoptions(self):
+        # specify lots of options to compressobj()
+        level = 2
+        method = zlib.DEFLATED
+        wbits = -12
+        memLevel = 9
+        strategy = zlib.Z_FILTERED
+        co = zlib.compressobj(level, method, wbits, memLevel, strategy)
+        x1 = co.compress(HAMLET_SCENE)
+        x2 = co.flush()
+        dco = zlib.decompressobj(wbits)
+        y1 = dco.decompress(x1 + x2)
+        y2 = dco.flush()
+        self.assertEqual(HAMLET_SCENE, y1 + y2)
+
+    # Lines 449-462 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_compressincremental(self):
+        # compress object in steps, decompress object as one-shot
+        data = HAMLET_SCENE * 128
+        co = zlib.compressobj()
+        bufs = []
+        for i in range(0, len(data), 256):
+            bufs.append(co.compress(data[i:i+256]))
+        bufs.append(co.flush())
+        combuf = b''.join(bufs)
+
+        dco = zlib.decompressobj()
+        y1 = dco.decompress(b''.join(bufs))
+        y2 = dco.flush()
+        self.assertEqual(data, y1 + y2)
+
+    # Lines 464-503 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_decompinc(self, flush=False, source=None, cx=256, dcx=64):
+        # compress object in steps, decompress object in steps
+        source = source or HAMLET_SCENE
+        data = source * 128
+        co = zlib.compressobj()
+        bufs = []
+        for i in range(0, len(data), cx):
+            bufs.append(co.compress(data[i:i+cx]))
+        bufs.append(co.flush())
+        combuf = b''.join(bufs)
+
+        decombuf = zlib.decompress(combuf)
+        # Test type of return value
+        self.assertIsInstance(decombuf, bytes)
+
+        self.assertEqual(data, decombuf)
+
+        dco = zlib.decompressobj()
+        bufs = []
+        for i in range(0, len(combuf), dcx):
+            bufs.append(dco.decompress(combuf[i:i+dcx]))
+            self.assertEqual(b'', dco.unconsumed_tail, ########
+                             "(A) uct should be b'': not %d long" %
+                                       len(dco.unconsumed_tail))
+            self.assertEqual(b'', dco.unused_data)
+        if flush:
+            bufs.append(dco.flush())
+        else:
+            while True:
+                chunk = dco.decompress(b'')
+                if chunk:
+                    bufs.append(chunk)
+                else:
+                    break
+        self.assertEqual(b'', dco.unconsumed_tail, ########
+                         "(B) uct should be b'': not %d long" %
+                                       len(dco.unconsumed_tail))
+        self.assertEqual(b'', dco.unused_data)
+        self.assertEqual(data, b''.join(bufs))
+        # Failure means: "decompressobj with init options failed"
+
+    # Lines 505-506 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_decompincflush(self):
+        self.test_decompinc(flush=True)
+
+    # Lines 508-533 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_decompimax(self, source=None, cx=256, dcx=64):
+        # compress in steps, decompress in length-restricted steps
+        source = source or HAMLET_SCENE
+        # Check a decompression object with max_length specified
+        data = source * 128
+        co = zlib.compressobj()
+        bufs = []
+        for i in range(0, len(data), cx):
+            bufs.append(co.compress(data[i:i+cx]))
+        bufs.append(co.flush())
+        combuf = b''.join(bufs)
+        self.assertEqual(data, zlib.decompress(combuf),
+                         'compressed data failure')
+
+        dco = zlib.decompressobj()
+        bufs = []
+        cb = combuf
+        while cb:
+            #max_length = 1 + len(cb)//10
+            chunk = dco.decompress(cb, dcx)
+            self.assertFalse(len(chunk) > dcx,
+                    'chunk too big (%d>%d)' % (len(chunk), dcx))
+            bufs.append(chunk)
+            cb = dco.unconsumed_tail
+        bufs.append(dco.flush())
+        self.assertEqual(data, b''.join(bufs), 'Wrong data retrieved')
+
+    # Lines 919-973 of Lib/test/test_zlib.py @ 5775aa8e
+    # xfail: streaming gzip / auto-detect wbits (16+15, 32+15, 32+9) are
+    # rejected by our compressobj/decompressobj since zlib-rs 0.6.3 stable
+    # API can't reach those wrap modes. The `decompressobj(wbits=14)`
+    # error-message assertion ('invalid window size') also won't match
+    # our wording. Both flip when zlib-rs exposes Deflate/Inflate
+    # with_config or we wire up libz-rs-sys (see THIRD_PARTY.md
+    # deviations #5 and #11).
+    @unittest.expectedFailure
+    def test_wbits(self):
+        # wbits=0 only supported since zlib v1.2.3.5
+        supports_wbits_0 = ZLIB_RUNTIME_VERSION_TUPLE >= (1, 2, 3, 5)
+
+        co = zlib.compressobj(level=1, wbits=15)
+        zlib15 = co.compress(HAMLET_SCENE) + co.flush()
+        self.assertEqual(zlib.decompress(zlib15, 15), HAMLET_SCENE)
+        if supports_wbits_0:
+            self.assertEqual(zlib.decompress(zlib15, 0), HAMLET_SCENE)
+        self.assertEqual(zlib.decompress(zlib15, 32 + 15), HAMLET_SCENE)
+        with self.assertRaisesRegex(zlib.error, 'invalid window size'):
+            zlib.decompress(zlib15, 14)
+        dco = zlib.decompressobj(wbits=32 + 15)
+        self.assertEqual(dco.decompress(zlib15), HAMLET_SCENE)
+        dco = zlib.decompressobj(wbits=14)
+        with self.assertRaisesRegex(zlib.error, 'invalid window size'):
+            dco.decompress(zlib15)
+
+        co = zlib.compressobj(level=1, wbits=9)
+        zlib9 = co.compress(HAMLET_SCENE) + co.flush()
+        self.assertEqual(zlib.decompress(zlib9, 9), HAMLET_SCENE)
+        self.assertEqual(zlib.decompress(zlib9, 15), HAMLET_SCENE)
+        if supports_wbits_0:
+            self.assertEqual(zlib.decompress(zlib9, 0), HAMLET_SCENE)
+        self.assertEqual(zlib.decompress(zlib9, 32 + 9), HAMLET_SCENE)
+        dco = zlib.decompressobj(wbits=32 + 9)
+        self.assertEqual(dco.decompress(zlib9), HAMLET_SCENE)
+
+        co = zlib.compressobj(level=1, wbits=-15)
+        deflate15 = co.compress(HAMLET_SCENE) + co.flush()
+        self.assertEqual(zlib.decompress(deflate15, -15), HAMLET_SCENE)
+        dco = zlib.decompressobj(wbits=-15)
+        self.assertEqual(dco.decompress(deflate15), HAMLET_SCENE)
+
+        co = zlib.compressobj(level=1, wbits=-9)
+        deflate9 = co.compress(HAMLET_SCENE) + co.flush()
+        self.assertEqual(zlib.decompress(deflate9, -9), HAMLET_SCENE)
+        self.assertEqual(zlib.decompress(deflate9, -15), HAMLET_SCENE)
+        dco = zlib.decompressobj(wbits=-9)
+        self.assertEqual(dco.decompress(deflate9), HAMLET_SCENE)
+
+        co = zlib.compressobj(level=1, wbits=16 + 15)
+        gzip = co.compress(HAMLET_SCENE) + co.flush()
+        self.assertEqual(zlib.decompress(gzip, 16 + 15), HAMLET_SCENE)
+        self.assertEqual(zlib.decompress(gzip, 32 + 15), HAMLET_SCENE)
+        dco = zlib.decompressobj(32 + 15)
+        self.assertEqual(dco.decompress(gzip), HAMLET_SCENE)
+
+        for wbits in (-15, 15, 31):
+            with self.subTest(wbits=wbits):
+                expected = HAMLET_SCENE
+                actual = zlib.decompress(
+                    zlib.compress(HAMLET_SCENE, wbits=wbits), wbits=wbits
+                )
+                self.assertEqual(expected, actual)
+
     # Lines 674-686 of Lib/test/test_zlib.py @ 5775aa8e
     def test_dictionary_streaming(self):
         # This simulates the reuse of a compressor object for compressing

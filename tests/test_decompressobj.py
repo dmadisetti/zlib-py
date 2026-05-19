@@ -13,11 +13,18 @@ lands — drop the decorator the moment libz-rs-sys is wired up.
 
 import copy
 import pickle
+import sys
 import unittest
 
 import zlib_py as zlib  # so vendored bodies run against our module unmodified
 
 from tests.test_compressobj import HAMLET_SCENE  # vendored block, reused
+
+
+# Lines 1220-1222 of Lib/test/test_zlib.py @ 5775aa8e
+class CustomInt:
+    def __index__(self):
+        return 100
 
 
 # CPython's test module defines this decorator based on whether the C
@@ -70,6 +77,31 @@ class DecompressObjectTestCase(unittest.TestCase):
         dco = zlib.decompressobj()
         self.assertRaises(ValueError, dco.decompress, b"", -1)
         self.assertEqual(b'', dco.unconsumed_tail)
+
+    # Lines 576-583 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_maxlen_large(self):
+        # Sizes up to sys.maxsize should be accepted, although zlib is
+        # internally limited to expressing sizes with unsigned int
+        data = HAMLET_SCENE * 10
+        self.assertGreater(len(data), zlib.DEF_BUF_SIZE)
+        compressed = zlib.compress(data, 1)
+        dco = zlib.decompressobj()
+        self.assertEqual(dco.decompress(compressed, sys.maxsize), data)
+
+    # Lines 585-589 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_maxlen_custom(self):
+        data = HAMLET_SCENE * 10
+        compressed = zlib.compress(data, 1)
+        dco = zlib.decompressobj()
+        self.assertEqual(dco.decompress(compressed, CustomInt()), data[:100])
+
+    # Lines 778-783 of Lib/test/test_zlib.py @ 5775aa8e
+    def test_flush_custom_length(self):
+        input = HAMLET_SCENE * 10
+        data = zlib.compress(input, 1)
+        dco = zlib.decompressobj()
+        dco.decompress(data, 1)
+        self.assertEqual(dco.flush(CustomInt()), input[1:])
 
     # Lines 585-592 of Lib/test/test_zlib.py @ 5775aa8e
     def test_clear_unconsumed_tail(self):
