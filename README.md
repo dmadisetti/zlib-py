@@ -32,7 +32,7 @@ uv run maturin develop
 uv run python -c 'import zlib_py; print(zlib_py.compress(...))'
 ```
 
-This uses whatever CPython + pyo3 your environment resolves (no grantees of working).
+This uses whatever CPython + pyo3 your environment resolves (no guarantees of working).
 
 
 ## Rust for CPython — links
@@ -43,8 +43,10 @@ This uses whatever CPython + pyo3 your environment resolves (no grantees of work
 
 ## Acknowledgements
 
-Prior art and inspiration: [`farhaanaliii/zlib-rs-python`](https://github.com/farhaanaliii/zlib-rs-python) — a separate pyo3 binding to `zlib-rs` with a broader stdlib-`zlib`-compatible surface (`compressobj`, `decompressobj`, checksums). If you want a more complete drop-in replacement today, look there.
+Prior art and inspiration:
+[`farhaanaliii/zlib-rs-python`](https://github.com/farhaanaliii/zlib-rs-python)
+a separate pyo3 binding to `zlib-rs`.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+[MIT](./LICENSE)

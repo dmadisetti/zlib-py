@@ -194,6 +194,19 @@ PATCH
             sed "s|@VENDOR_DIR@|${cargoVendor}/vendor|g" \
               ${cargoVendor}/config.toml > .cargo/config.toml
           '';
+
+          # pyo3's abi3-py38 feature produces stable-ABI bindings, but
+          # maturin still tags the .so with the build python's version
+          # (`cpython-315-darwin.so`). Rename to `*.abi3.so` so any
+          # 3.8+ interpreter — including customPython 3.16 — will load
+          # it via the abi3 importer.
+          postFixup = ''
+            find $out -name "*.cpython-*-*.so" | while read -r f; do
+              dir=$(dirname "$f")
+              base=$(basename "$f" | sed 's/\.cpython-.*$/.abi3.so/')
+              mv "$f" "$dir/$base"
+            done
+          '';
         };
 
         # Wrap customPython so the abi3 wheel built against the scaffold
@@ -210,7 +223,12 @@ PATCH
           done
         '';
 
-        testEnv = mkCustomPythonEnv ":${scaffoldPython.pkgs.pytest}/${scaffoldPython.sitePackages}";
+        # A scaffold env that has pytest + all of its propagated deps
+        # (pluggy, iniconfig, etc.) on a single site-packages tree. We
+        # point our wrapper's PYTHONPATH at that tree so customPython can
+        # `-m pytest` cleanly.
+        pytestScaffold = scaffoldPython.withPackages (ps: [ ps.pytest ]);
+        testEnv = mkCustomPythonEnv ":${pytestScaffold}/${scaffoldPython.sitePackages}";
 
       in {
         packages = {
