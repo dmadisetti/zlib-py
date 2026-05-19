@@ -31,6 +31,7 @@ places. The corrections we apply when porting are:
 | 14 | `Z_DEFLATED` constant | Defined | Omitted — stdlib has `DEFLATED` only |
 | 15 | `error` exception | Imported from stdlib `zlib` | Defined in our module |
 | 16 | `ZLIB_VERSION` | Hardcoded `"1.2.11"` | `"1.3.1.zlib-rs-0.6.3"` (honest about the underlying engine) |
+| 17 | gzip streaming | n/a (reference omits gzip support entirely) | `decompressobj()` and `_ZlibDecompressor` reject gzip wbits (24..=31) and auto-detect (40..=47) with an honest error; zlib-rs 0.6.3's stable `Inflate::new` only does zlib/raw. Use one-shot `decompress()` for gzip — it routes through `decompress_slice` which accepts the full `InflateConfig`. |
 
 See `CONVERSION.md` for the full mapping from `zlibmodule.c` to
 `zlib-rs`. License compatibility for the adaptation is recorded in the

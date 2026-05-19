@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyBufferError, PyException, PyNotImplementedError, PyValueError};
+use pyo3::exceptions::{PyBufferError, PyEOFError, PyException, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use zlib_rs::{Deflate, DeflateFlush, Inflate, InflateFlush, Status};
@@ -679,6 +679,209 @@ impl Decompress {
     }
 }
 
+// ---- _ZlibDecompressor ------------------------------------------------------
+
+// Stdlib's underscore-private decompressor — `gzip.GzipFile` and the
+// streaming readers depend on it. Differs from `Decompress` in three
+// ways: (a) internal input buffer instead of `unconsumed_tail`,
+// (b) `max_length=-1` is the unlimited sentinel (not `0`),
+// (c) any decompress() call after `eof` raises `EOFError`.
+
+struct ZlibDecompressorState {
+    inflate: Inflate,
+    /// Bytes the caller has fed but the decoder hasn't yet consumed.
+    /// Grown by every decompress() call; compacted (front-trimmed) at the
+    /// end of each call so it doesn't grow unboundedly when the caller
+    /// streams in many small chunks.
+    input_buffer: Vec<u8>,
+    /// Reusable output buffer.
+    output_scratch: Vec<u8>,
+    unused_data: Vec<u8>,
+    eof: bool,
+    needs_input: bool,
+    /// Stashed zdict awaiting a NeedDict signal from the decoder
+    /// (zlib-format streams only — set_dictionary returns StreamError
+    /// before the header is consumed).
+    zdict: Option<Vec<u8>>,
+}
+
+#[pyclass(name = "_ZlibDecompressor")]
+pub struct ZlibDecompressor {
+    state: Mutex<ZlibDecompressorState>,
+}
+
+#[pymethods]
+impl ZlibDecompressor {
+    #[new]
+    #[pyo3(signature = (wbits=15, zdict=None))]
+    fn new(wbits: i32, zdict: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        // Same restriction as decompressobj — zlib-rs 0.6.3's stable
+        // Inflate::new doesn't support gzip-wrap or auto-detect, so we
+        // bail honestly rather than silently picking the wrong format.
+        if (24..=31).contains(&wbits) || (40..=47).contains(&wbits) {
+            return Err(error::new_err(
+                "gzip / auto-detect wbits not supported by _ZlibDecompressor in this \
+                 build; use decompress() one-shot for those formats",
+            ));
+        }
+        if !((-15..=-8).contains(&wbits) || (8..=15).contains(&wbits) || wbits == 0) {
+            return Err(PyValueError::new_err("Invalid initialization option"));
+        }
+        let (zlib_header, window_bits) = if wbits == 0 {
+            (true, 15u8)
+        } else if wbits < 0 {
+            (false, (-wbits) as u8)
+        } else {
+            (true, wbits as u8)
+        };
+        let mut inflate = Inflate::new(zlib_header, window_bits);
+        let zdict = match zdict {
+            Some(d) => {
+                let buf = PyBuffer::<u8>::get(d)?;
+                Some(buffer_as_slice(&buf)?.to_vec())
+            }
+            None => None,
+        };
+        // Raw streams: apply dict eagerly. Zlib streams: stash until NeedDict.
+        if !zlib_header {
+            if let Some(d) = zdict.as_deref() {
+                let _ = inflate.set_dictionary(d);
+            }
+        }
+        Ok(ZlibDecompressor {
+            state: Mutex::new(ZlibDecompressorState {
+                inflate,
+                input_buffer: Vec::new(),
+                output_scratch: Vec::with_capacity(32768),
+                unused_data: Vec::new(),
+                eof: false,
+                needs_input: true,
+                zdict,
+            }),
+        })
+    }
+
+    #[pyo3(signature = (data, max_length=-1))]
+    fn decompress(
+        &self,
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        max_length: i64,
+    ) -> PyResult<Py<PyBytes>> {
+        let py_buf = PyBuffer::<u8>::get(data)?;
+        let new_input = buffer_as_slice(&py_buf)?;
+
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+
+        if state.eof {
+            return Err(PyEOFError::new_err("End of stream already reached"));
+        }
+
+        // Only negative max_length means "unlimited" for _ZlibDecompressor.
+        // max_length == 0 literally caps output at zero bytes (input is
+        // buffered, nothing emitted) — verified against
+        // test_decompressor_inputbuf_{1,2} which assert exactly that.
+        let cap = if max_length < 0 { usize::MAX } else { max_length as usize };
+
+        state.input_buffer.extend_from_slice(new_input);
+
+        const SCRATCH: usize = 32768;
+        if state.output_scratch.len() < SCRATCH {
+            state.output_scratch.resize(SCRATCH, 0);
+        }
+
+        let mut output: Vec<u8> = Vec::new();
+        let mut input_pos = 0usize;
+        loop {
+            if output.len() >= cap {
+                state.needs_input = false;
+                break;
+            }
+            let want = (cap - output.len()).min(state.output_scratch.len());
+            if want == 0 {
+                state.needs_input = false;
+                break;
+            }
+            let chunk_in = &state.input_buffer[input_pos..];
+            let old_total_in = state.inflate.total_in();
+            let old_total_out = state.inflate.total_out();
+            let result = state.inflate.decompress(
+                chunk_in,
+                &mut state.output_scratch[..want],
+                InflateFlush::NoFlush,
+            );
+            let status = match result {
+                Ok(s) => s,
+                Err(zlib_rs::InflateError::NeedDict { .. }) => {
+                    if let Some(d) = state.zdict.as_deref() {
+                        let consumed = (state.inflate.total_in() - old_total_in) as usize;
+                        input_pos += consumed;
+                        state.inflate.set_dictionary(d).map_err(|e| {
+                            error::new_err(format!("setting dictionary failed: {:?}", e))
+                        })?;
+                        continue;
+                    }
+                    return Err(error::new_err(
+                        "preset dictionary required to decompress, but none was provided",
+                    ));
+                }
+                Err(e) => {
+                    return Err(error::new_err(format!(
+                        "Error while decompressing data: {:?}",
+                        e
+                    )));
+                }
+            };
+            let consumed = (state.inflate.total_in() - old_total_in) as usize;
+            let produced = (state.inflate.total_out() - old_total_out) as usize;
+            input_pos += consumed;
+            output.extend_from_slice(&state.output_scratch[..produced]);
+
+            if matches!(status, Status::StreamEnd) {
+                state.eof = true;
+                if input_pos < state.input_buffer.len() {
+                    state.unused_data.extend_from_slice(&state.input_buffer[input_pos..]);
+                }
+                state.input_buffer.clear();
+                input_pos = 0;
+                state.needs_input = false;
+                break;
+            }
+            if consumed == 0 && produced == 0 {
+                // No progress — need more input.
+                state.needs_input = true;
+                break;
+            }
+        }
+
+        // Compact input_buffer: drop consumed prefix.
+        if input_pos > 0 {
+            state.input_buffer.drain(..input_pos);
+        }
+        if !state.eof {
+            state.needs_input = state.input_buffer.is_empty();
+        }
+        Ok(PyBytes::new(py, &output).unbind())
+    }
+
+    #[getter]
+    fn eof(&self) -> bool {
+        self.state.lock().unwrap().eof
+    }
+
+    #[getter]
+    fn unused_data(&self, py: Python<'_>) -> Py<PyBytes> {
+        let state = self.state.lock().unwrap();
+        PyBytes::new(py, &state.unused_data).unbind()
+    }
+
+    #[getter]
+    fn needs_input(&self) -> bool {
+        self.state.lock().unwrap().needs_input
+    }
+}
+
 // ---- module registration ----------------------------------------------------
 
 #[pymodule]
@@ -721,6 +924,7 @@ fn zlib_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Compress>()?;
     m.add_class::<Decompress>()?;
+    m.add_class::<ZlibDecompressor>()?;
 
     m.add_function(wrap_pyfunction!(adler32, m)?)?;
     m.add_function(wrap_pyfunction!(crc32, m)?)?;
