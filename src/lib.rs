@@ -44,7 +44,16 @@ fn adler32(data: &Bound<'_, PyAny>, value: u32) -> PyResult<u32> {
 #[pyfunction]
 #[pyo3(signature = (data, value=0, /))]
 fn crc32(data: &Bound<'_, PyAny>, value: u32) -> PyResult<u32> {
-    stub()
+    let buf = PyBuffer::<u8>::get(data)?;
+    if !buf.is_c_contiguous() {
+        return Err(PyBufferError::new_err(
+            "buffer must be C-contiguous",
+        ));
+    }
+    let slice = unsafe {
+        std::slice::from_raw_parts(buf.buf_ptr() as *const u8, buf.item_count())
+    };
+    Ok(zlib_rs::crc32::crc32(value, slice))
 }
 
 #[pyfunction]
