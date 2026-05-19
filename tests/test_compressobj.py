@@ -102,7 +102,6 @@ requires_Decompress_copy = unittest.expectedFailure
 
 class CompressObjectTestCase(unittest.TestCase):
     # Lines 514-535 of Lib/test/test_zlib.py @ 5775aa8e
-    @unittest.expectedFailure  # round-trip through decompressobj — lands next commit
     def test_pair(self):
         # straightforward compress/decompress objects
         datasrc = HAMLET_SCENE * 128
@@ -197,7 +196,6 @@ class CompressObjectTestCase(unittest.TestCase):
                     del obj
 
     # Lines 625-647 of Lib/test/test_zlib.py @ 5775aa8e
-    @unittest.expectedFailure  # round-trip through decompressobj — lands next commit
     @unittest.skipUnless(hasattr(zlib, 'Z_SYNC_FLUSH'),
                          'requires zlib.Z_SYNC_FLUSH')
     def test_odd_flush(self):
@@ -222,7 +220,6 @@ class CompressObjectTestCase(unittest.TestCase):
         self.assertEqual(expanded, data, "17K random source doesn't match")
 
     # Lines 649-657 of Lib/test/test_zlib.py @ 5775aa8e
-    @unittest.expectedFailure  # touches decompressobj — lands next commit
     def test_empty_flush(self):
         # Test that calling .flush() on unused objects works.
         # (Bug #1083110 -- calling .flush() on decompress objects
@@ -234,7 +231,6 @@ class CompressObjectTestCase(unittest.TestCase):
         self.assertEqual(dco.flush(), b"") # Returns nothing
 
     # Lines 659-672 of Lib/test/test_zlib.py @ 5775aa8e
-    @unittest.expectedFailure  # round-trip through decompressobj — lands next commit
     def test_dictionary(self):
         h = HAMLET_SCENE
         # Build a simulated dictionary out of the words in HAMLET.
@@ -252,7 +248,6 @@ class CompressObjectTestCase(unittest.TestCase):
         self.assertRaises(zlib.error, dco.decompress, cd)
 
     # Lines 674-686 of Lib/test/test_zlib.py @ 5775aa8e
-    @unittest.expectedFailure  # round-trip through decompressobj — lands next commit
     def test_dictionary_streaming(self):
         # This simulates the reuse of a compressor object for compressing
         # several separate data streams.
