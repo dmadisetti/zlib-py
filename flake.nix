@@ -155,7 +155,7 @@ PATCH
           dontFixup = true;
           outputHashAlgo = "sha256";
           outputHashMode = "recursive";
-          outputHash = "sha256-cCAN6Wekbg1XS/cmWya2SqFi7uUZODWcU3vCvAIDS8M=";
+          outputHash = "sha256-xLGqN7dODXpJlKgKRFz7GjtK0CXNf+GKrmdLlmDAEOw=";
         };
 
         # The package is built using the *scaffold* python's pkgs scope

@@ -128,16 +128,22 @@ fn crc32(data: &Bound<'_, PyAny>, value: u32) -> PyResult<u32> {
     Ok(zlib_rs::crc32::crc32(value, slice))
 }
 
+// CPython's adler32_combine / crc32_combine route `len2` through
+// `Py_off_t_converter`, which accepts any Python int (incl. negatives)
+// and the C zlib functions cast it through `z_off_t`. We mirror that by
+// accepting i64 here and reinterpreting to u64 — matches C's cast and
+// stays spec-compatible. zlib-rs 0.6.3 exposes both combine helpers
+// publicly so no hand-rolling needed.
 #[pyfunction]
 #[pyo3(signature = (adler1, adler2, len2, /))]
 fn adler32_combine(adler1: u32, adler2: u32, len2: i64) -> PyResult<u32> {
-    stub()
+    Ok(zlib_rs::adler32::adler32_combine(adler1, adler2, len2 as u64))
 }
 
 #[pyfunction]
 #[pyo3(signature = (crc1, crc2, len2, /))]
 fn crc32_combine(crc1: u32, crc2: u32, len2: i64) -> PyResult<u32> {
-    stub()
+    Ok(zlib_rs::crc32::crc32_combine(crc1, crc2, len2 as u64))
 }
 
 #[pyfunction]
