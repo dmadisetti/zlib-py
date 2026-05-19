@@ -6,11 +6,14 @@
 //! callable bodies all raise `NotImplementedError`. Filled in
 //! function-by-function in subsequent commits — see CONVERSION.md.
 
+use std::sync::Mutex;
+
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyBufferError, PyException, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use zlib_rs::{Deflate, DeflateFlush, Status};
 
 /// Validate wbits for one-shot compress / streaming compressobj.
 /// Accepts -15..=-8 (raw), 8..=15 (zlib), 25..=31 (gzip).
@@ -221,7 +224,50 @@ fn compressobj(
     strategy: i32,
     zdict: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Compress> {
-    stub()
+    if level != -1 && !(0..=9).contains(&level) {
+        return Err(PyValueError::new_err("Bad compression level"));
+    }
+    if method != 8 {
+        return Err(error::new_err("Bad compression method"));
+    }
+    if (25..=31).contains(&wbits) {
+        // zlib-rs 0.6.3's stable Deflate::new doesn't surface the gzip wrap
+        // mode that wbits >= 16 selects in C zlib (DeflateStream::new accepts
+        // the full DeflateConfig but is pub(crate)). Bail honestly rather
+        // than silently emitting a zlib-wrapped stream when gzip was asked.
+        return Err(error::new_err(
+            "gzip wbits (25..=31) not supported by compressobj() in this build; \
+             use compress() one-shot for gzip output",
+        ));
+    }
+    validate_compress_wbits(wbits)?;
+    // memLevel and strategy are accepted for API parity but currently
+    // ignored — zlib-rs stable Deflate constructor doesn't surface them.
+    // Tracked as deviation #5 in THIRD_PARTY.md.
+    let _ = memLevel;
+    let _ = strategy;
+
+    let (zlib_header, window_bits) = if wbits < 0 {
+        (false, (-wbits) as u8)
+    } else {
+        (true, wbits as u8)
+    };
+    let mut deflate = Deflate::new(level, zlib_header, window_bits);
+
+    if let Some(d) = zdict {
+        let buf = PyBuffer::<u8>::get(d)?;
+        let dict = buffer_as_slice(&buf)?;
+        deflate.set_dictionary(dict).map_err(|e| {
+            error::new_err(format!("setting dictionary failed: {:?}", e))
+        })?;
+    }
+
+    Ok(Compress {
+        state: Mutex::new(CompressState {
+            deflate: Some(deflate),
+            buf: Vec::with_capacity(32768),
+        }),
+    })
 }
 
 #[pyfunction]
@@ -238,27 +284,108 @@ fn decompressobj(wbits: i32, zdict: Option<&Bound<'_, PyAny>>) -> PyResult<Decom
 // surface. Renames to plain `Compress`/`Decompress` once `compressobj` is
 // implemented and tests can reach them via `type(compressobj())`.
 
+struct CompressState {
+    /// `None` after a Z_FINISH flush — the stream is closed and any further
+    /// operation must raise.
+    deflate: Option<Deflate>,
+    /// Reusable scratch buffer to avoid per-call allocations.
+    buf: Vec<u8>,
+}
+
+fn deflate_flush_from_mode(mode: i32) -> PyResult<DeflateFlush> {
+    match mode {
+        0 => Ok(DeflateFlush::NoFlush),
+        1 => Ok(DeflateFlush::PartialFlush),
+        2 => Ok(DeflateFlush::SyncFlush),
+        3 => Ok(DeflateFlush::FullFlush),
+        4 => Ok(DeflateFlush::Finish),
+        5 => Ok(DeflateFlush::Block),
+        // Z_TREES (6) isn't a deflate flush mode in zlib — only inflate.
+        _ => Err(PyValueError::new_err("Invalid flush option")),
+    }
+}
+
 #[pyclass(name = "_Compress")]
-pub struct Compress;
+pub struct Compress {
+    state: Mutex<CompressState>,
+}
 
 #[pymethods]
 impl Compress {
-    #[new]
-    fn new() -> Self {
-        Self
-    }
+    fn compress(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+        let py_buf = PyBuffer::<u8>::get(data)?;
+        let input = buffer_as_slice(&py_buf)?;
 
-    fn compress(&self, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
-        stub()
+        let mut guard = self.state.lock().unwrap();
+        let CompressState { deflate, buf } = &mut *guard;
+        let Some(deflate) = deflate.as_mut() else {
+            return Err(error::new_err(
+                "compressor has been flushed and cannot be reused",
+            ));
+        };
+
+        let needed = zlib_rs::compress_bound(input.len()) + 64;
+        if buf.len() < needed {
+            buf.resize(needed, 0);
+        }
+
+        let old_total_out = deflate.total_out();
+        deflate
+            .compress(input, buf, DeflateFlush::NoFlush)
+            .map_err(|e| error::new_err(format!("compress failed: {:?}", e)))?;
+        let written = (deflate.total_out() - old_total_out) as usize;
+        Ok(PyBytes::new(py, &buf[..written]).unbind())
     }
 
     #[pyo3(signature = (mode=4, /))]
-    fn flush(&self, mode: i32) -> PyResult<Py<PyBytes>> {
-        stub()
+    fn flush(&self, py: Python<'_>, mode: i32) -> PyResult<Py<PyBytes>> {
+        let flush_mode = deflate_flush_from_mode(mode)?;
+        // Spec: Z_NO_FLUSH on flush() is a no-op that returns empty bytes
+        // immediately.
+        if flush_mode == DeflateFlush::NoFlush {
+            return Ok(PyBytes::new(py, b"").unbind());
+        }
+
+        let mut guard = self.state.lock().unwrap();
+        let CompressState { deflate, buf } = &mut *guard;
+        let Some(deflate) = deflate.as_mut() else {
+            return Err(error::new_err(
+                "compressor has been flushed and cannot be reused",
+            ));
+        };
+
+        if buf.len() < 32768 {
+            buf.resize(32768, 0);
+        }
+
+        let mut output: Vec<u8> = Vec::with_capacity(4096);
+        let buf_len = buf.len();
+        loop {
+            let old_total_out = deflate.total_out();
+            let status = deflate
+                .compress(&[], buf, flush_mode)
+                .map_err(|e| error::new_err(format!("flush failed: {:?}", e)))?;
+            let written = (deflate.total_out() - old_total_out) as usize;
+            output.extend_from_slice(&buf[..written]);
+            match status {
+                Status::StreamEnd => break,
+                _ if written < buf_len && flush_mode != DeflateFlush::Finish => break,
+                _ if written == 0 => break,
+                _ => continue,
+            }
+        }
+
+        if flush_mode == DeflateFlush::Finish {
+            guard.deflate = None;
+        }
+
+        Ok(PyBytes::new(py, &output).unbind())
     }
 
     fn copy(&self) -> PyResult<Compress> {
-        stub()
+        Err(PyNotImplementedError::new_err(
+            "Compress.copy not yet supported — needs libz-rs-sys deflateCopy",
+        ))
     }
 }
 
