@@ -2,12 +2,6 @@
 
 Source: https://github.com/python/cpython/blob/5775aa8e295102156de14fd1ba284722c6ede95a/Lib/test/test_zlib.py
 Commit: 5775aa8e295102156de14fd1ba284722c6ede95a (3.16-alpha)
-
-The original tests round-trip through `zlib.decompress`, which is still
-a stub in our crate. Until that lands, the decompress calls are routed
-through the stdlib `zlib` module so the compress output we produce is
-still verified against a known-good decompressor. The compress side —
-what this commit implements — goes through `zlib_py`.
 """
 
 import unittest
@@ -84,33 +78,30 @@ LAERTES
 
 class CompressTestCase(unittest.TestCase):
     # Lines 580-583 of Lib/test/test_zlib.py @ 5775aa8e
-    # (decompress routed through stdlib while ours is still a stub)
     def test_speech(self):
         x = zlib_py.compress(HAMLET_SCENE)
-        self.assertEqual(cpython_zlib.decompress(x), HAMLET_SCENE)
+        self.assertEqual(zlib_py.decompress(x), HAMLET_SCENE)
 
     # Lines 585-595 of Lib/test/test_zlib.py @ 5775aa8e
-    # (decompress routed through stdlib while ours is still a stub)
     def test_keywords(self):
         x = zlib_py.compress(HAMLET_SCENE, level=3)
-        self.assertEqual(cpython_zlib.decompress(x), HAMLET_SCENE)
+        self.assertEqual(zlib_py.decompress(x), HAMLET_SCENE)
         with self.assertRaises(TypeError):
             zlib_py.compress(data=HAMLET_SCENE, level=3)
-        self.assertEqual(cpython_zlib.decompress(x,
+        self.assertEqual(zlib_py.decompress(x,
                                                  wbits=zlib_py.MAX_WBITS,
                                                  bufsize=zlib_py.DEF_BUF_SIZE),
                          HAMLET_SCENE)
 
     # Lines 597-606 of Lib/test/test_zlib.py @ 5775aa8e
-    # (decompress routed through stdlib while ours is still a stub;
-    # the HW_ACCELERATED guard is dropped — zlib-rs is deterministic.)
+    # (the HW_ACCELERATED guard is dropped — zlib-rs is deterministic.)
     def test_speech128(self):
         # compress more data
         data = HAMLET_SCENE * 128
         x = zlib_py.compress(data)
         self.assertEqual(zlib_py.compress(bytearray(data)), x)
         for ob in x, bytearray(x):
-            self.assertEqual(cpython_zlib.decompress(ob), data)
+            self.assertEqual(zlib_py.decompress(ob), data)
 
 class ByteParityWithStdlib(unittest.TestCase):
     """Byte-for-byte equality with the C zlib implementation.

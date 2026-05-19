@@ -22,6 +22,52 @@ fn validate_compress_wbits(wbits: i32) -> PyResult<()> {
     }
 }
 
+/// Validate wbits for one-shot decompress / streaming decompressobj.
+/// Accepts the compress range plus 0 (use header) and 40..=47 (auto-detect).
+/// Mirrors zlib's inflateInit2 windowBits encoding: low 4 bits = window size,
+/// high bits = wrap mode (0=zlib, 16=gzip, 32=auto).
+fn validate_decompress_wbits(wbits: i32) -> PyResult<()> {
+    if wbits == 0
+        || (-15..=-8).contains(&wbits)
+        || (8..=15).contains(&wbits)
+        || (24..=31).contains(&wbits)
+        || (40..=47).contains(&wbits)
+    {
+        Ok(())
+    } else {
+        Err(error::new_err("Invalid initialization option"))
+    }
+}
+
+/// Lookup table from zlib-rs `ReturnCode` to (numeric code, symbolic name,
+/// human message). The numeric codes match C zlib's 1:1 so existing
+/// zlib-format error regexes can match our messages.
+///
+/// **Divergence note.** C zlib distinguishes two failure modes that
+/// zlib-rs collapses:
+/// - `Z_BUF_ERROR` (-5): inflate ran out of input mid-stream (truncation)
+///   *or* output buffer full with no progress possible.
+/// - `Z_DATA_ERROR` (-3): corrupt deflate (bad huffman, bad CRC, etc.).
+///
+/// zlib-rs reports both as `DataError(-3)`. Callers that need to
+/// distinguish "truncated" from "corrupt" can't, regardless of what
+/// message we attach here. See `tests/test_decompress.py::DecompressTestCase::test_incomplete_stream`
+/// for the test this affects.
+fn return_code_info(rc: zlib_rs::ReturnCode) -> (i32, &'static str, &'static str) {
+    use zlib_rs::ReturnCode::*;
+    match rc {
+        Ok           => ( 0, "Z_OK",            ""),
+        StreamEnd    => ( 1, "Z_STREAM_END",    ""),
+        NeedDict     => ( 2, "Z_NEED_DICT",     "preset dictionary required"),
+        ErrNo        => (-1, "Z_ERRNO",         "io error"),
+        StreamError  => (-2, "Z_STREAM_ERROR",  "invalid stream state"),
+        DataError    => (-3, "Z_DATA_ERROR",    "invalid or incomplete data"),
+        MemError     => (-4, "Z_MEM_ERROR",     "out of memory"),
+        BufError     => (-5, "Z_BUF_ERROR",     "incomplete or truncated stream"),
+        VersionError => (-6, "Z_VERSION_ERROR", "incompatible zlib version"),
+    }
+}
+
 /// Get a contiguous `&[u8]` view of a buffer-protocol object.
 /// Caller must keep the PyBuffer alive for the slice's lifetime.
 fn buffer_as_slice<'a>(buf: &'a PyBuffer<u8>) -> PyResult<&'a [u8]> {
@@ -114,17 +160,55 @@ fn compress(
             let n = compressed.len();
             Ok(PyBytes::new(py, &output[..n]).unbind())
         }
-        _ => Err(error::new_err(format!(
-            "Error {:?} while compressing data",
-            rc
-        ))),
+        _ => {
+            let (code, _, msg) = return_code_info(rc);
+            Err(error::new_err(format!(
+                "Error {} while compressing data: {}",
+                code, msg,
+            )))
+        }
     }
 }
 
 #[pyfunction]
 #[pyo3(signature = (data, /, wbits=15, bufsize=16384))]
-fn decompress(data: &Bound<'_, PyAny>, wbits: i32, bufsize: usize) -> PyResult<Py<PyBytes>> {
-    stub()
+fn decompress(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    wbits: i32,
+    bufsize: usize,
+) -> PyResult<Py<PyBytes>> {
+    validate_decompress_wbits(wbits)?;
+    let buf = PyBuffer::<u8>::get(data)?;
+    let input = buffer_as_slice(&buf)?;
+
+    let config = zlib_rs::InflateConfig { window_bits: wbits };
+    // Start at bufsize literally (spec: bufsize is the initial buffer; 0 is
+    // coerced to 1). Double on BufError, no fixed cap — caller's RAM is the
+    // limit, not us.
+    let mut size = bufsize.max(1);
+    loop {
+        let mut output = vec![0u8; size];
+        let (decompressed, rc) = zlib_rs::decompress_slice(&mut output, input, config);
+        match rc {
+            zlib_rs::ReturnCode::Ok | zlib_rs::ReturnCode::StreamEnd => {
+                let n = decompressed.len();
+                return Ok(PyBytes::new(py, &output[..n]).unbind());
+            }
+            zlib_rs::ReturnCode::BufError => {
+                size = size.checked_mul(2).ok_or_else(|| {
+                    error::new_err("decompression output exceeds usize::MAX bytes")
+                })?;
+            }
+            _ => {
+                let (code, _, msg) = return_code_info(rc);
+                return Err(error::new_err(format!(
+                    "Error {} while decompressing data: {}",
+                    code, msg,
+                )));
+            }
+        }
+    }
 }
 
 #[pyfunction]
