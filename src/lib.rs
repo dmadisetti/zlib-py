@@ -86,12 +86,6 @@ fn buffer_as_slice<'a>(buf: &'a PyBuffer<u8>) -> PyResult<&'a [u8]> {
 
 create_exception!(zlib_py, error, PyException);
 
-fn stub<T>() -> PyResult<T> {
-    Err(PyNotImplementedError::new_err(
-        "zlib_py: not yet implemented",
-    ))
-}
-
 // ---- module-level functions -------------------------------------------------
 
 #[pyfunction]
