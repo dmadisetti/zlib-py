@@ -125,3 +125,15 @@ def test_combine_functions_match_stdlib_when_available():
         for name in FUNCTIONS_3_14:
             assert hasattr(zlib, name), f"stdlib zlib missing {name} on 3.14+"
             assert hasattr(zlib_py, name), name
+
+
+def test_zlib_decompressor_class_shape():
+    """_ZlibDecompressor was added to stdlib in 3.12. zlib_py always exposes
+    it; this asserts presence parity (and that stdlib carries it on 3.12+)."""
+    cls = zlib_py._ZlibDecompressor
+    assert isinstance(cls, type)
+    assert callable(getattr(cls, "decompress"))
+    for attr in ("eof", "unused_data", "needs_input"):
+        assert hasattr(cls, attr), attr
+    if sys.version_info >= (3, 12):
+        assert hasattr(zlib, "_ZlibDecompressor"), "stdlib zlib missing _ZlibDecompressor on 3.12+"

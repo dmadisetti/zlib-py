@@ -93,9 +93,14 @@ jobs:
           - runner: windows-latest
             target: x64
             python_arch: x64
-          - runner: windows-latest
-            target: x86
-            python_arch: x86
+          # x86 (i686) target disabled: hosted runner ships only x64 pythons
+          # in C:\hostedtoolcache, so maturin --find-interpreter skips all
+          # of them with a platform-mismatch warning and the build fails
+          # with "Could not find any interpreters". Re-enable once we have
+          # a way to provision a 32-bit interpreter on the runner.
+          # - runner: windows-latest
+          #   target: x86
+          #   python_arch: x86
           - runner: windows-11-arm
             target: aarch64
             python_arch: arm64

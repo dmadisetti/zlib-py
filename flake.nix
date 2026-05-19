@@ -155,10 +155,19 @@ PATCH
           dontFixup = true;
           outputHashAlgo = "sha256";
           outputHashMode = "recursive";
-          outputHash = "sha256-cCAN6Wekbg1XS/cmWya2SqFi7uUZODWcU3vCvAIDS8M=";
+          outputHash = "sha256-xLGqN7dODXpJlKgKRFz7GjtK0CXNf+GKrmdLlmDAEOw=";
         };
 
-        zlibPy = customPython.pkgs.buildPythonPackage {
+        # The package is built using the *scaffold* python's pkgs scope
+        # rather than `customPython.pkgs`. customPython is 3.16-alpha and
+        # nixpkgs has no python316 bootstrap chain — buildPythonPackage's
+        # hooks (pythonRuntimeDepsCheckHook, etc.) import 3.15-built
+        # `packaging`, which 3.16 can't load. Since we enabled pyo3's
+        # `abi3-py38` feature, the resulting wheel's .so is version
+        # agnostic, so customPython picks it up fine at runtime via
+        # PYTHONPATH.
+        scaffoldPython = pkgs.python315;
+        zlibPy = scaffoldPython.pkgs.buildPythonPackage {
           pname = "zlib-py";
           version = "0.1.0";
           src = lib.cleanSource ./.;
@@ -171,6 +180,11 @@ PATCH
             maturin
           ];
 
+          # pyo3 0.27 only knows up to Python 3.14; the scaffold here is
+          # 3.15. With abi3-py38 enabled the actual ABI is stable, so the
+          # check is overly conservative — wave it off.
+          env.PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1";
+
           postPatch = ''
             chmod -R u+w .
             sed "s|@PYO3_SRC@|${pyo3Src}|g" \
@@ -180,21 +194,53 @@ PATCH
             sed "s|@VENDOR_DIR@|${cargoVendor}/vendor|g" \
               ${cargoVendor}/config.toml > .cargo/config.toml
           '';
+
+          # pyo3's abi3-py38 feature produces stable-ABI bindings, but
+          # maturin still tags the .so with the build python's version
+          # (`cpython-315-darwin.so`). Rename to `*.abi3.so` so any
+          # 3.8+ interpreter — including customPython 3.16 — will load
+          # it via the abi3 importer.
+          postFixup = ''
+            find $out -name "*.cpython-*-*.so" | while read -r f; do
+              dir=$(dirname "$f")
+              base=$(basename "$f" | sed 's/\.cpython-.*$/.abi3.so/')
+              mv "$f" "$dir/$base"
+            done
+          '';
         };
 
-        testEnv = customPython.withPackages (ps: [ zlibPy ps.pytest ]);
+        # Wrap customPython so the abi3 wheel built against the scaffold
+        # python is importable by our 3.16-alpha interpreter.
+        zlibPySitePackages = "${zlibPy}/${scaffoldPython.sitePackages}";
+        mkCustomPythonEnv = extraPath: pkgs.runCommand "cpython-git-${cpythonShortRev}-env" {
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+        } ''
+          mkdir -p $out/bin
+          for bin in ${customPython}/bin/python*; do
+            name=$(basename $bin)
+            makeWrapper $bin $out/bin/$name \
+              --prefix PYTHONPATH : "${zlibPySitePackages}${extraPath}"
+          done
+        '';
+
+        # A scaffold env that has pytest + all of its propagated deps
+        # (pluggy, iniconfig, etc.) on a single site-packages tree. We
+        # point our wrapper's PYTHONPATH at that tree so customPython can
+        # `-m pytest` cleanly.
+        pytestScaffold = scaffoldPython.withPackages (ps: [ ps.pytest ]);
+        testEnv = mkCustomPythonEnv ":${pytestScaffold}/${scaffoldPython.sitePackages}";
 
       in {
         packages = {
           default = zlibPy;
-          python  = customPython.withPackages (_: [ zlibPy ]);
+          python  = mkCustomPythonEnv "";
           inherit testEnv;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
             customPython
-            customPython.pkgs.pytest
+            scaffoldPython.pkgs.pytest
             pkgs.maturin
             pkgs.cargo
             pkgs.rustc
